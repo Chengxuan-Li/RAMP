@@ -36,6 +36,8 @@ from ramp.post_process.post_process import Plot
 from typing import List, Union, Iterable
 from ramp.errors_logs.errors import InvalidType, InvalidWindow
 
+from scipy.stats import truncnorm
+
 
 def single_appliance_daily_load_profile(args):
     app, args = args
@@ -387,7 +389,8 @@ class UseCase:
         return np.arange(peak_time - rand_peak_enlarge, peak_time + rand_peak_enlarge)
 
     def generate_daily_load_profiles(
-        self, days=None, flat=True, cases=None, verbose=False
+        self, days=None, flat=True, cases=None, verbose=False,
+        gaussian_scale: Union[float, None] = 1.0
     ):
         """
         Iterate over the days and generate a daily profile for each of the days
@@ -410,7 +413,7 @@ class UseCase:
         if cases is not None:
             results = {}
             for case in cases:
-                profiles = self.generate_daily_load_profiles(days=days, flat=True)
+                profiles = self.generate_daily_load_profiles(days=days, flat=True, gaussian_scale=gaussian_scale)
                 results[f"case {case}"] = pd.Series(
                     index=self.datetimeindex, data=profiles
                 )
@@ -435,7 +438,7 @@ class UseCase:
                     # all appliances they own, corresponds to step 2. of [1], p.7
                     for user in self.users:
                         user.generate_aggregated_load_profile(
-                            day_idx, self.peak_time_range, get_day_type(day)
+                            day_idx, self.peak_time_range, get_day_type(day), gaussian_scale=gaussian_scale
                         )
                         # aggregate the user load to the usecase load
                         usecase_load = usecase_load + user.load
@@ -495,7 +498,7 @@ class UseCase:
                 unit="unit",
             ) as pbar:
                 imap_unordered_it = pool.imap_unordered(
-                    single_appliance_daily_load_profile, tasks, chunksize=4
+                    single_appliance_daily_load_profile, tasks, chunksize=4, gaussian_scale=gaussian_scale
                 )
                 for prof_i, daily_load in imap_unordered_it:
                     if prof_i in daily_profiles_dict:
@@ -970,7 +973,8 @@ appliances: no appliances assigned to the user.
         )
 
     def generate_single_load_profile(
-        self, prof_i: int = 0, peak_time_range: np.array = None, day_type: int = 0
+        self, prof_i: int = 0, peak_time_range: np.array = None, day_type: int = 0, 
+        gaussian_scale: Union[float, None] = None
     ):
         """Generates a load profile for a single user taking all its appliances into consideration
 
@@ -1011,7 +1015,7 @@ appliances: no appliances assigned to the user.
             App
         ) in self.App_list:  # iterates for all the App types in the given User class
             App.generate_load_profile(
-                prof_i, peak_time_range, day_type, power=App.power[prof_i]
+                prof_i, peak_time_range, day_type, power=App.power[prof_i], gaussian_scale=None
             )
 
             single_load = (
@@ -1020,7 +1024,8 @@ appliances: no appliances assigned to the user.
         return single_load
 
     def generate_aggregated_load_profile(
-        self, prof_i=0, peak_time_range=None, day_type=0
+        self, prof_i=0, peak_time_range=None, day_type=0,
+        gaussian_scale: Union[float, None] = None
     ):
         """Generates an aggregated load profile from single load profile of each user
 
@@ -1049,7 +1054,7 @@ appliances: no appliances assigned to the user.
         for _ in range(self.num_users):
             # iterates for every single user within a User class.
             self.load = self.load + self.generate_single_load_profile(
-                prof_i, peak_time_range, day_type
+                prof_i, peak_time_range, day_type, gaussian_scale=gaussian_scale
             )
 
         return self.load
@@ -1817,7 +1822,8 @@ class Appliance:
             )
         return rand_time
 
-    def rand_switch_on_window(self, rand_time: int):
+    def rand_switch_on_window(self, rand_time: int,
+                              gaussian_scale: Union[float, None] = None):
         """Identifies a random switch on window within the available functioning windows
 
         This corresponds to step 2c. of:
@@ -1826,18 +1832,44 @@ class Appliance:
             Generating high-resolution multi-energy load profiles for remote areas with an open-source stochastic model,
             Energy, 2019, https://doi.org/10.1016/j.energy.2019.04.097.
         """
+        gaussian_scale=1.0
+        gaussian_mode = False
+        if gaussian_scale == None:
+            gaussian_mode = False
 
-        indexes_choice = []
-        for s in self.free_spots:
-            if s.stop - s.start >= self.func_cycle:
-                indexes_choice += [
-                    *range(s.start, s.stop - self.func_cycle + 1)
-                ]  # this will be fast with cython
-        n_choices = len(indexes_choice)
+        if gaussian_mode:
+            ranges_gaussian = []
+            for s in self.free_spots:
+                if s.stop - s.start >= self.func_cycle:
+                    ranges_gaussian.append([
+                        s.start, s.stop - self.func_cycle + 1
+                    ])
+            n_choices = len(ranges_gaussian)
+        else:
+            indexes_choice = []
+            for s in self.free_spots:
+                if s.stop - s.start >= self.func_cycle:
+                    indexes_choice += [
+                        *range(s.start, s.stop - self.func_cycle + 1)
+                    ]  # this will be fast with cython
+            n_choices = len(indexes_choice)
         if n_choices > 0:
-            # Identifies a random switch on time within the available functioning windows
-            # step 2c of [1]
-            switch_on = indexes_choice[random.randint(0, n_choices - 1)]
+            if gaussian_mode:
+                # Identifies a random switch on time within the available functioning windows
+                switch_on_range = ranges_gaussian[random.randint(0, n_choices - 1)]
+                a, b = -3, 3
+                loc = 0.5 * (switch_on_range[0] + switch_on_range[1])
+                scale = (switch_on_range[1] - switch_on_range[0]) / 6
+                switch_on = int(round(truncnorm.rvs(
+                    a,
+                    b,
+                    loc=loc, # todo loc
+                    scale=scale # todo std
+                )))
+            else:
+                # Identifies a random switch on time within the available functioning windows
+               # step 2c of [1]
+               switch_on = indexes_choice[random.randint(0, n_choices - 1)]
             spot_idx = None
             for i, fs in enumerate(self.free_spots):
                 if fs.start <= switch_on <= fs.stop - self.func_cycle:
@@ -1908,7 +1940,7 @@ class Appliance:
                         + str(self.cw32)
                         + ". Picking another random switch on event. You probably see this warning because your window of use is the same as the duty cycle window and the random variability of the windows of use is greater than zero. If you see this warning only once, no need to worry, this is inherent to stochasticity."
                     )
-                    return self.rand_switch_on_window(rand_time)
+                    return self.rand_switch_on_window(rand_time, gaussian_scale=gaussian_scale)
 
                 if (
                     indexes.size > duty_cycle_duration
@@ -1968,7 +2000,8 @@ class Appliance:
             coincidence = self.number
         return coincidence
 
-    def generate_load_profile(self, prof_i, peak_time_range, day_type, power):
+    def generate_load_profile(self, prof_i, peak_time_range, day_type, power,
+                              gaussian_scale: Union[float, None] = None):
         """Generate load profile of the Appliance instance by updating its daily_use attribute
 
         Run steps 2a and 2b and repeat steps 2c – 2e of [1] until the sum of the durations of
@@ -2040,6 +2073,7 @@ class Appliance:
             # one option could be to generate a lot of them at once
             indexes = self.rand_switch_on_window(
                 rand_time=rand_time,  # TODO maybe only consider rand_time-tot_time ...
+                gaussian_scale=gaussian_scale
             )
             if indexes is None:
                 break  # exit cycle and go to next Appliance as there are no available windows anymore

@@ -109,7 +109,7 @@ for file in os.listdir(TEST_OUTPUT_PATH):
 for i, ul in enumerate([User_list1, User_list2, User_list3]):
     of_path = os.path.join(".", "ramp/test", "results", f"output_file_{i + 1}.csv")
     if os.path.exists(of_path) is False:
-        uc = UseCase(users=ul, parallel_processing=False, random_seed=True)
+        uc = UseCase(users=ul, parallel_processing=False)
         uc.initialize(peak_enlarge=0.15, num_days=30)
 
         Profiles_list = uc.generate_daily_load_profiles(flat=True)
